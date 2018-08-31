@@ -242,9 +242,10 @@ class ParserCoderbusy:
         else:
             return False
 
+
 parsers = [
     ParserKuai,
     ParserXici,
-    ParserGoubanjia,
+    # ParserGoubanjia,
     ParserCoderbusy
 ]

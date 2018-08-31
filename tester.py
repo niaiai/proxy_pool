@@ -9,23 +9,25 @@ import concurrent.futures
 from queue import Queue
 
 import requests
-import redis
+from .utils import get_redis, redis_http_https
 
 
 class Tester:
-    def __init__(self, test_times):
+    def __init__(self, test_times, queue=None):
         """初始化验证器。
 
         :param test_times: 验证次数，指使用某个代理进行测试连接的次数。
         """
-        self._proxies_queue_to_test = Queue()
+        self._proxies_queue_to_test = Queue() if queue is None else queue
         self._test_times = test_times
-        self._valid_proxies = redis.Redis()
+        self._valid_proxies = get_redis()
         self._logger = logging.getLogger('pool.tester')
+        self._worker = None
 
     def start(self):
         """通过此接口启动验证器，结束一轮验证后，再次使用要重新启动。"""
         self._worker = threading.Thread(target=self._work)
+        self._worker.setDaemon(True)
         self._worker.start()
 
     def test(self, proxy):
@@ -39,7 +41,8 @@ class Tester:
 
     def is_done(self):
         """验证器是否完成了所有代理的验证。"""
-        return not self._worker.is_alive()
+        if self._worker:
+            return not self._worker.is_alive()
 
     def _test_single_proxy(self, requests_session, proxy):
         """验证代理的工作接口。
@@ -60,10 +63,11 @@ class Tester:
                                           proxies={proxy_protocol: proxy_str}, timeout=5) as resp:
                     if resp.status_code != 200 or resp.history:
                         break
-                    if json.loads(resp.text)['origin'] != proxy['ip']:
+                    if resp.json()['origin'] != proxy['ip']:
                         break
             else:
-                self._valid_proxies.sadd('proxies_{}'.format(proxy_protocol), json.dumps(proxy))
+                self._logger.info("test %s ok", proxy_str)
+                self._valid_proxies.sadd(redis_http_https[proxy_protocol], json.dumps(proxy))
         except requests.exceptions.RequestException:
             pass
 
@@ -76,15 +80,17 @@ class Tester:
         tasks = []
 
         with requests.Session() as requests_session:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
                 while True:
                     try:
+                        if self._proxies_queue_to_test.empty():
+                            continue
                         proxy_to_test = json.loads(self._proxies_queue_to_test.get())
                     except json.decoder.JSONDecodeError:
                         concurrent.futures.wait(tasks)
                         with self._proxies_queue_to_test.mutex:
                             self._proxies_queue_to_test.queue.clear()
-                        self._logger.debug('test quit')
+                        self._logger.info('test quit')
                         break
                     else:
                         self._logger.debug('get proxy to test: %s', proxy_to_test['ip'])

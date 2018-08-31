@@ -10,10 +10,10 @@ import threading
 from queue import Queue
 
 import requests
-import redis
 from lxml import html
 
 from . import tester
+from .utils import get_redis, redis_http, redis_https
 
 
 class Crawler:
@@ -22,7 +22,7 @@ class Crawler:
         self._urls_to_crawl = Queue()
         self._urls_crawled = Queue()
         self._pages_to_parse = Queue()
-        self._redis = redis.Redis()
+        self._redis = get_redis()
         self._sentinel = object()  # 抓取终止信号
         self._logger = logging.getLogger('pool.crawler.{}'.format(self._PROXY_NAME))
         self._parser = parser
@@ -53,6 +53,10 @@ class Crawler:
             elif work == 'end':
                 self._urls_to_crawl.put(self._sentinel)
                 self._pages_to_parse.put(self._sentinel)
+            elif work == 'quit':
+                self._logger.info("main crawler quit")
+                self._logger.info("test is done %s", self._tester.is_done())
+                break
 
     def _parse(self, response_times_allow):
         """代理页面解析。
@@ -72,7 +76,7 @@ class Crawler:
                     self._pages_to_parse.queue.clear()
 
                 self._tester.test('end')
-                self._logger.info('parse quit')
+                self._logger.info('parse spider quit')
                 break
 
             tree = html.fromstring(page_to_parse)
@@ -118,14 +122,14 @@ class Crawler:
                 with self._urls_crawled.mutex:
                     self._urls_crawled.queue.clear()
 
-                self._logger.info('crawl quit')
+                self._logger.info('crawl spider quit')
                 break
 
             retry_count = 0
             while True:
-                proxy_str = self._redis.spop('proxies_http')
+                proxy_str = self._redis.spop(redis_http)
                 if proxy_str:
-                    self._redis.sadd('proxies_http', proxy_str)
+                    self._redis.sadd(redis_http, proxy_str)
                     proxy = json.loads(proxy_str)
                     p = '{}:{}'.format(proxy['ip'], proxy['port'])
 
@@ -170,27 +174,27 @@ if __name__ == '__main__':
 
     q = Queue()
     c = Crawler(parser.parsers[3], q)
-    r = redis.Redis()
+    r = get_redis()
 
     worker = threading.Thread(target=c.start)
     worker.start()
 
     q.put('start')
 
-    l_http = r.scard('proxies_http')
-    l_https = r.scard('proxies_https')
+    l_http = r.scard(redis_http)
+    l_https = r.scard(redis_https)
     while l_http < 5 or l_https < 5:
         time.sleep(0.01)
-        l_http = r.scard('proxies_http')
-        l_https = r.scard('proxies_https')
+        l_http = r.scard(redis_http)
+        l_https = r.scard(redis_https)
 
     q.put('end')
     print(l_http)
-    for proxy in r.sscan_iter('proxies_http'):
+    for proxy in r.sscan_iter(redis_http):
         p = json.loads(proxy)
         print('{}:{}'.format(p['ip'], p['port']), end=', ')
     print()
     print(l_https)
-    for proxy in r.sscan_iter('proxies_https'):
+    for proxy in r.sscan_iter(redis_https):
         p = json.loads(proxy)
         print('{}:{}'.format(p['ip'], p['port']), end=', ')
